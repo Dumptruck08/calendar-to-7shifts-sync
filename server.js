@@ -50,13 +50,13 @@ app.get("/", (req, res) => {
   `);
 });
 
-// OAuth authorization redirect
+// OAuth 2.0: Step 1 - redirect user to Google's consent screen
 app.get("/auth", (req, res) => {
   const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${CLIENT_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&response_type=code&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar.events.readonly&access_type=offline&prompt=consent`;
   res.redirect(authUrl);
 });
 
-// Google OAuth2 redirect handler
+// OAuth 2.0: Step 2 - Google sends the user back with a code
 app.get("/oauth2callback", async (req, res) => {
   const code = req.query.code;
 
@@ -72,7 +72,7 @@ app.get("/oauth2callback", async (req, res) => {
         code: code,
         client_id: CLIENT_ID,
         client_secret: CLIENT_SECRET,
-        redirect_uri: REDIRECT_URI, // ✅ Correct usage of env variable
+        redirect_uri: REDIRECT_URI,
         grant_type: 'authorization_code'
       },
       headers: {
@@ -90,7 +90,8 @@ app.get("/oauth2callback", async (req, res) => {
       <h2>✅ Google access token received!</h2>
       <p><strong>Access Token:</strong> ${access_token}</p>
       <p><strong>Refresh Token:</strong> ${refresh_token}</p>
-      <p>Save these tokens securely to access Google Calendar later.</p>
+      <p>Expires in: ${expires_in} seconds</p>
+      <p>You can now use this token to fetch calendar events.</p>
     `);
   } catch (error) {
     console.error("❌ Token exchange error:", error.response?.data || error.message);
@@ -98,6 +99,43 @@ app.get("/oauth2callback", async (req, res) => {
   }
 });
 
-// Start server
+// Fetch Google Calendar events
+app.get("/events", async (req, res) => {
+  const token = req.query.token;
+
+  if (!token) {
+    return res.status(400).send("❌ Missing access_token in query");
+  }
+
+  try {
+    const response = await axios.get("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
+      headers: {
+        Authorization: `Bearer ${token}`
+      },
+      params: {
+        timeMin: new Date().toISOString(),
+        maxResults: 10,
+        singleEvents: true,
+        orderBy: "startTime"
+      }
+    });
+
+    const events = response.data.items.map(event => ({
+      summary: event.summary,
+      start: event.start,
+      end: event.end
+    }));
+
+    res.json({ count: events.length, events });
+
+  } catch (error) {
+    console.error("❌ Failed to fetch events:", error.response?.data || error.message);
+    res.status(500).send("❌ Calendar fetch failed");
+  }
+});
+
+// Start the server
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Server listening on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`✅ Server listening on port ${PORT}`);
+});
