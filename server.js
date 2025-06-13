@@ -11,6 +11,9 @@ app.use(express.json());
 const CLIENT_ID = process.env.CLIENT_ID;
 const CLIENT_SECRET = process.env.CLIENT_SECRET;
 const REDIRECT_URI = process.env.REDIRECT_URI;
+const SEVENSHIFTS_API_KEY = process.env.SEVENSHIFTS_API_KEY;
+const SEVENSHIFTS_COMPANY_ID = process.env.SEVENSHIFTS_COMPANY_ID;
+const SEVENSHIFTS_LOCATION_ID = process.env.SEVENSHIFTS_LOCATION_ID;
 
 // Homepage
 app.get("/", (req, res) => {
@@ -50,26 +53,21 @@ app.get("/", (req, res) => {
   `);
 });
 
-// OAuth 2.0: Step 1 - redirect user to Google's consent screen
+// Google OAuth start
 app.get("/auth", (req, res) => {
   const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${CLIENT_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&response_type=code&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar.events.readonly&access_type=offline&prompt=consent`;
   res.redirect(authUrl);
 });
 
-// OAuth 2.0: Step 2 - Google sends the user back with a code
+// Google OAuth callback
 app.get("/oauth2callback", async (req, res) => {
   const code = req.query.code;
-
-  if (!code) {
-    return res.status(400).send("❌ No auth code received from Google.");
-  }
-
-  console.log("✅ Received auth code:", code);
+  if (!code) return res.status(400).send("❌ No auth code received");
 
   try {
     const tokenResponse = await axios.post('https://oauth2.googleapis.com/token', null, {
       params: {
-        code: code,
+        code,
         client_id: CLIENT_ID,
         client_secret: CLIENT_SECRET,
         redirect_uri: REDIRECT_URI,
@@ -91,21 +89,18 @@ app.get("/oauth2callback", async (req, res) => {
       <p><strong>Access Token:</strong> ${access_token}</p>
       <p><strong>Refresh Token:</strong> ${refresh_token}</p>
       <p>Expires in: ${expires_in} seconds</p>
-      <p>You can now use this token to fetch calendar events.</p>
+      <p>You can now <a href="/events?token=${access_token}">fetch events</a> or <a href="/sync?token=${access_token}">sync to 7shifts</a>.</p>
     `);
-  } catch (error) {
-    console.error("❌ Token exchange error:", error.response?.data || error.message);
+  } catch (err) {
+    console.error("❌ Token exchange error:", err.response?.data || err.message);
     res.status(500).send("❌ Token exchange failed");
   }
 });
 
-// Fetch Google Calendar events
+// Fetch calendar events
 app.get("/events", async (req, res) => {
   const token = req.query.token;
-
-  if (!token) {
-    return res.status(400).send("❌ Missing access_token in query");
-  }
+  if (!token) return res.status(400).send("❌ Missing access_token");
 
   try {
     const response = await axios.get("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
@@ -128,9 +123,61 @@ app.get("/events", async (req, res) => {
 
     res.json({ count: events.length, events });
 
-  } catch (error) {
-    console.error("❌ Failed to fetch events:", error.response?.data || error.message);
+  } catch (err) {
+    console.error("❌ Failed to fetch events:", err.response?.data || err.message);
     res.status(500).send("❌ Calendar fetch failed");
+  }
+});
+
+// Sync events to 7shifts
+app.get("/sync", async (req, res) => {
+  const token = req.query.token;
+  if (!token) return res.status(400).send("❌ Missing access_token");
+
+  try {
+    const calRes = await axios.get("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
+      headers: { Authorization: `Bearer ${token}` },
+      params: {
+        timeMin: new Date().toISOString(),
+        maxResults: 10,
+        singleEvents: true,
+        orderBy: "startTime"
+      }
+    });
+
+    const shiftsCreated = [];
+
+    for (const event of calRes.data.items) {
+      const shift = {
+        location_id: parseInt(SEVENSHIFTS_LOCATION_ID),
+        start: event.start.dateTime || event.start.date,
+        end: event.end.dateTime || event.end.date,
+        published: true,
+        notes: event.summary || "Imported from Google Calendar"
+      };
+
+      const shiftRes = await axios.post(
+        `https://api.7shifts.com/v2/company/${SEVENSHIFTS_COMPANY_ID}/shifts`,
+        shift,
+        {
+          headers: {
+            Authorization: `Bearer ${SEVENSHIFTS_API_KEY}`,
+            "Content-Type": "application/json"
+          }
+        }
+      );
+
+      shiftsCreated.push(shiftRes.data.data);
+    }
+
+    res.json({
+      message: `✅ Synced ${shiftsCreated.length} events to 7shifts`,
+      shifts: shiftsCreated
+    });
+
+  } catch (err) {
+    console.error("❌ Sync failed:", err.response?.data || err.message);
+    res.status(500).send("❌ Sync to 7shifts failed. Check server logs.");
   }
 });
 
